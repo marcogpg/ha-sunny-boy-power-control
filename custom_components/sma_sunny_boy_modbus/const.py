@@ -84,5 +84,5 @@ READ_BATCHES = [
     (30773, 36),   # real power, AC voltage, current, frequency
     (30833, 10),   # power mode status, setpoints
     (30951, 6),    # temperature
-    (40209, 8),    # active power mode config, limit W, limit %
+    (40210, 6),    # active power mode config, limit W, limit %
 ]
