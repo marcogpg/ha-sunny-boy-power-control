@@ -213,12 +213,20 @@ class SMAModbusClient:
                 self._reader.readexactly(6), timeout=self._timeout
             )
             _, _, length = struct.unpack(">HHH", raw_header)
-            await asyncio.wait_for(
+            body = await asyncio.wait_for(
                 self._reader.readexactly(length), timeout=self._timeout
             )
         except Exception as exc:
             raise SMAModbusError(f"Grid Guard login failed: {exc}") from exc
 
+        if len(body) >= 2 and body[1] >= 0x80:
+            exc_code = body[2] if len(body) > 2 else 0
+            raise SMAModbusError(
+                f"Grid Guard login rejected by inverter (Modbus exception 0x{exc_code:02X}) "
+                "— check the code is the numeric Grid Guard code, not a web login password"
+            )
+
+        _LOGGER.debug("Grid Guard login accepted at protocol level (unit %s)", self._unit_id)
         await asyncio.sleep(0.1)  # 100 ms settle time
 
     # ── Register helpers ──────────────────────────────────────────────────
@@ -393,6 +401,8 @@ class SMAModbusClient:
             await self._write_u32_register(REG_POWER_LIMIT_PERCENT, round(percent))
             await asyncio.sleep(0.1)
             await self._write_u32_register(REG_ACTIVE_POWER_MODE, POWER_MODE_PERCENT)
+            await asyncio.sleep(0.1)
+            await self._verify_write(REG_POWER_LIMIT_PERCENT, round(percent), "power limit (%)")
 
     async def set_power_limit_watt(
         self, watts: int, installer_password: str = ""
@@ -408,6 +418,31 @@ class SMAModbusClient:
             await self._write_u32_register(REG_POWER_LIMIT_WATT, watts)
             await asyncio.sleep(0.1)
             await self._write_u32_register(REG_ACTIVE_POWER_MODE, POWER_MODE_WATT)
+            await asyncio.sleep(0.1)
+            await self._verify_write(REG_POWER_LIMIT_WATT, watts, "power limit (W)")
+
+    async def _verify_write(self, address: int, expected: int, label: str) -> None:
+        """
+        Re-read a written register and warn if the inverter did not apply it.
+
+        A silently ignored write (no Modbus exception, but the value never
+        changes) is the typical symptom of a wrong/missing Grid Guard code.
+        """
+        try:
+            w0, w1 = await self._read_registers_raw(address, 2)
+            actual = self._to_u32(w0, w1)
+        except SMAModbusError as exc:
+            _LOGGER.warning("Could not verify %s write: %s", label, exc)
+            return
+
+        if actual != expected:
+            _LOGGER.warning(
+                "%s write not applied by inverter: requested %s, inverter still reports %s. "
+                "This usually means the Grid Guard code is missing or incorrect.",
+                label, expected, actual,
+            )
+        else:
+            _LOGGER.debug("%s write confirmed: inverter now reports %s", label, actual)
 
     async def test_connection(self) -> dict:
         """
